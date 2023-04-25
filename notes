@@ -1,0 +1,138 @@
+@using Microsoft.Extensions.Configuration
+@inject IConfiguration Configuration
+@model BuyerPortal.WebApp.Shared.Models.Registration.PaymentDetailsVM
+@{
+    var orderId = @BuyerPortal.WebApp.Shared.Helpers.General.GenerateAlphanumeric(40);
+}
+<form id="frmPaymentMon" method="post" action="@Configuration["Moneris:Url"]">
+    <input type="hidden" name="ps_store_id" value="@Configuration["Moneris:storeId"]" />
+    <input type="hidden" name="hpp_key" value="@Configuration["Moneris:key"]" />
+
+    <input type="hidden" name="charge_total" value="@Model.PromocodeModel.Fee" />
+    <input type="hidden" name="cust_id" value="@Model.AuthUserkey" />
+    <input type="hidden" name="order_id" value="@orderId" />
+    <input type="hidden" name="lang" value="en" />
+    <input type="hidden" name="email" value="@Model.registrantInfo.Email" />
+</form>
+
+public class MonerisPaymentResponseProperties
+    {
+        public const string Response_Order_Id = "response_order_id";
+        public const string Response_Code = "response_code";
+        public const string Date_stamp = "date_stamp";
+        public const string Time_stamp = "time_stamp";
+        public const string Bank_Transaction_Id = "bank_transaction_id";
+        public const string Charge_Total = "charge_total";
+        public const string Bank_Approval_Code = "bank_approval_code";
+        public const string Iso_Code = "iso_code";
+        public const string Message = "message";
+        public const string Trans_Name = "trans_name";
+        public const string Result = "result";
+        public const string Txn_Num = "txn_num";
+        public const string Email = "email";
+        public const string Cust_Id = "cust_id";
+        public const string Note = "note";
+        public const string CardHolder = "cardholder";
+        public const string F4l4 = "f4l4";
+        public const string Card = "card";
+        public const string Expiry_date = "expiry_date";
+
+        //Derived Properties        
+        public const string LastFourDigits = "lastfourdigits";
+    }
+    
+    private MNPayment GetPaymentResponseObject(string authUserKey)
+        {
+            var operation = _telemetryUtility.Start("GetPaymentResponseObject");
+            MNPayment monerisPaymentResponse = null;
+            try
+            {
+                _telemetryUtility.Trace("MonerisResponseObject/start", "", "", "");
+                var dictionary = Request.Form.ToDictionary(k => k.Key, k => $"{k.Value}");
+
+                //Debugging
+                _telemetryUtility.Trace("MonerisResponseObject/ResponseFormObject", "", $"AuthUserKey:{authUserKey},Response:{string.Join(",", dictionary.Select(kv => kv.Key + "=" + kv.Value).ToArray())}", "");
+
+                //Scrub Data
+                string value = "";
+                if (dictionary.TryGetValue(MonerisPaymentResponseProperties.F4l4, out value))
+                {
+                    dictionary[MonerisPaymentResponseProperties.LastFourDigits] = $"{value}".Substring(Math.Max(0, $"{value}".Length - 4));
+                    dictionary[MonerisPaymentResponseProperties.F4l4] = $"{value}"; //(new CommonUtil()).EnCrypt(CommonUtil.GetMaskedCCNumLast4digits(value.ToStringNullEmpty()));
+                    _telemetryUtility.Trace("MonerisResponseObject/F4l4", "", $"AuthUserKey:{authUserKey},Response:{value}", "");
+                }
+                if (dictionary.TryGetValue($"{MonerisPaymentResponseProperties.Expiry_date}", out value))
+                {
+                    dictionary[$"{MonerisPaymentResponseProperties.Expiry_date}"] = new Regex("\\S").Replace(value, "*");
+                    _telemetryUtility.Trace("MonerisResponseObject/Expiry_date", "", $"AuthUserKey:{authUserKey},Response:{value}", "");
+                }
+                if (dictionary.TryGetValue($"{MonerisPaymentResponseProperties.CardHolder}", out value))
+                {
+                    dictionary[$"{MonerisPaymentResponseProperties.CardHolder}"] = new Regex("\\S").Replace(value, "*");
+                    _telemetryUtility.Trace("MonerisResponseObject/CardHolder", "", $"AuthUserKey:{authUserKey},Response:{value}", "");
+                }
+
+                var jsonPostedData = JsonConvert.SerializeObject(dictionary);
+                _telemetryUtility.Trace("MonerisResponseObject/jsonPostedData", "", $"AuthUserKey:{authUserKey},Response:{jsonPostedData}", "");
+
+                if (dictionary.Count() > 0)
+                    monerisPaymentResponse = JsonConvert.DeserializeObject<MNPayment>(jsonPostedData);
+            }
+            catch (Exception ex)
+            {
+                TrackException(ex, "MonerisResponseObject/exception");
+                ViewBag.MonerisPaymentDeclined = true;
+                monerisPaymentResponse = null;
+            }
+            finally
+            {
+                _telemetryClient.StopOperation(operation);
+            }
+
+            return monerisPaymentResponse;
+        }
+
+        [HttpPost]
+        [Route("MonerisPaymentProcess")]
+        public async Task<ActionResult> MonerisPaymentProcessAsync()
+        {
+            var operation = _telemetryUtility.Start("MonerisPaymentProcess");
+            var urlRedirect = "CA/Payment";
+            var authUserKey = Encryption.decrypt($"{_httpContextAccessor.HttpContext.Request.Cookies["l"]}");
+
+            try
+            {
+                _telemetryUtility.Trace("MonerisProcess/authUserKey", "", $"AuthUserKey:{authUserKey}", "");
+
+                if (string.IsNullOrEmpty(authUserKey))
+                    return Redirect(REDIRECT_LOGIN_URL);
+
+                MNPayment monerisResult = GetPaymentResponseObject(authUserKey);
+                if (monerisResult != null)
+                {
+                    // log
+                    if (monerisResult.IsApproved)
+                    {
+                        _telemetryUtility.Trace("MonerisProcess/paymentApproved", "", $"AuthUserKey:{authUserKey},Response:{JsonConvert.SerializeObject(monerisResult)}", "");
+                        urlRedirect = await _registrationService.MonerisPaymentProcessAsync(authUserKey, monerisResult);
+                    }
+                    else
+                    {
+                        _telemetryUtility.Trace("MonerisProcess/paymentDeclined", "", $"AuthUserKey:{authUserKey},Response:{monerisResult.Message}", "");
+                        TempData["MonerisPaymentDeclined"] = true;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                TrackException(ex, "MonerisProcess/exception");
+                TempData["PaymentTransactionError"] = true;
+            }
+            finally
+            {
+                _telemetryUtility.Trace("MonerisProcess/urlRedirect", "", $"AuthUserKey:{authUserKey},Response:{urlRedirect}", "");
+                _telemetryClient.StopOperation(operation);
+            }
+            await Response.WriteAsync("<script>top.location='" + urlRedirect + "';parent.location='" + urlRedirect + "';</script>");
+            return View();
+        }
