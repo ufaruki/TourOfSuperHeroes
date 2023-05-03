@@ -1,3 +1,10 @@
+1 - Application -> Domain, Domain Services, Shared 
+2 - Domain Services -> Domain, Shared
+3 - Domain -> Shared
+4 - Shared
+Release
+
+
 @using Microsoft.Extensions.Configuration
 @inject IConfiguration Configuration
 @model BuyerPortal.WebApp.Shared.Models.Registration.PaymentDetailsVM
